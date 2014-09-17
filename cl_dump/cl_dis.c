@@ -1,0 +1,272 @@
+/*
+ * cl_dis.c - Functions for disassembling V3D control lists and related
+ * structures and buffers
+ *
+ * Written by Greg Chadwick (mail@gregchadwick.co.uk)
+ */
+
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <stdio.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <errno.h>
+#include <assert.h>
+#include <string.h>
+
+#include "v3d_cl_instr_autogen.h"
+#include "cl_dump.h"
+
+//When disassembling a CL if we don't have an end address we disassemble
+//til we hit a BRANCH (not sub-list branch) or RETURN.  If we've got a 
+//bad CL we may end up disassembling junk for a long time.  This puts a limit
+//on how large we let a CL get before giving up.
+#define MAX_CL_SIZE 512 * 1024 //512 kb
+
+typedef struct {
+   uint32_t start_address;
+   uint32_t end_address;
+   void*    cl_start;
+   void*    cl_end;
+   void*    cur_ins;
+   uint32_t current_area_size;
+} dis_state_t;
+
+#define BUF_TYPE_NONE 0
+#define BUF_TYPE_CL   1
+
+typedef struct v3d_buf {
+   struct v3d_buf* next;
+
+   uint32_t buf_type;
+   uint32_t buf_start;
+   uint32_t buf_end;
+} v3d_buf_t;
+
+static v3d_buf_t* v3d_bufs = 0;
+static v3d_buf_t* v3d_bufs_end = 0;
+
+static void add_v3d_buf(uint32_t buf_type, uint32_t buf_start, uint32_t buf_end);
+static void pop_v3d_buf(void);
+static void init_dis_state(dis_state_t* state, uint32_t start_address, uint32_t end_address);
+static int increase_dis_area(dis_state_t* state);
+static uint32_t virt_to_dis_addr(void* addr, dis_state_t* state);
+static int is_cl_end(uint8_t* ins);
+static void add_buf_references(void* ins, uint32_t end_address);
+static int dis_cl(uint32_t start_address, uint32_t end_address);
+
+//TODO: if end address is actually inside an instruction this may cause a segmentation error
+int do_dis(char* start_addr_str, char* end_addr_str) {
+   uint32_t start_addr;
+   uint32_t end_addr;
+
+   if(sscanf(start_addr_str, "0x%x", &start_addr) != 1) {
+      fprintf(stderr, "Addresses must be of form 0x1234ABCD\n");
+      return 1;
+   }
+
+   if(sscanf(end_addr_str, "0x%x", &end_addr) != 1) {
+      fprintf(stderr, "Addresses must be of form 0x1234ABCD\n");
+      return 1;
+   }
+
+   add_v3d_buf(BUF_TYPE_CL, start_addr, end_addr);
+
+   printf("Disassembling CL start: %08x end: %08x\n", start_addr, end_addr);
+   
+   while(v3d_bufs) {
+      switch(v3d_bufs->buf_type) {
+         case BUF_TYPE_CL:
+            if(dis_cl(v3d_bufs->buf_start, v3d_bufs->buf_end)) {
+               fprintf(stderr, "Failed to disassemble CL buf start: %08x end: %x\n", v3d_bufs->buf_start, v3d_bufs->buf_end);
+            }
+            break;
+         default:
+            fprintf(stderr, "Seen invalid buffer type %d whilst disassembling\n", v3d_bufs->buf_type);
+      }
+
+      pop_v3d_buf();
+   }
+
+   return 0;
+}
+
+static void add_v3d_buf(uint32_t buf_type, uint32_t buf_start, uint32_t buf_end) {
+   v3d_buf_t* new_buf = malloc(sizeof(v3d_buf_t));
+
+   new_buf->buf_type = buf_type;
+   new_buf->buf_start = buf_start;
+   new_buf->buf_end = buf_end;
+
+
+#ifdef CL_DUMP_DEBUG
+   printf("Adding disassembly buffer start: %08x, end: %08x, type: %d\n", buf_start, buf_end, buf_type);
+#endif
+
+   if(v3d_bufs) {
+      assert(v3d_bufs_end);
+
+      v3d_bufs_end->next = new_buf;
+      v3d_bufs_end = new_buf;
+   } else {
+      v3d_bufs = v3d_bufs_end = new_buf;
+   }
+}
+
+static void pop_v3d_buf() {
+   v3d_buf_t* to_pop = v3d_bufs;
+
+   assert(to_pop);
+
+   v3d_bufs = v3d_bufs->next;
+
+   if(to_pop == v3d_bufs_end) {
+      assert(v3d_bufs_end->next == 0);
+
+      v3d_bufs_end = 0;
+   }
+
+   free(to_pop);
+}
+
+static void init_dis_state(dis_state_t* state, uint32_t start_address, uint32_t end_address) {
+   memset(state, 0, sizeof(dis_state_t));
+   state->current_area_size = 1;
+   state->start_address = start_address;
+   state->end_address = end_address;
+}
+
+static int increase_dis_area(dis_state_t* state) {
+   uint32_t cur_ins_offset;
+
+   cur_ins_offset = state->cur_ins - state->cl_start;
+
+   if(state->cl_start) {
+      unmap_area(state->cl_start, state->current_area_size);
+   }
+   
+   state->current_area_size *= 2;
+
+#ifdef CL_DUMP_DEBUG
+   printf("Expanding diassembly memory area to size %d cur_ins: %p\n", state->current_area_size, state->cur_ins);
+#endif
+
+   if(state->current_area_size > MAX_CL_SIZE) {
+      fprintf(stderr, "Runaway disassembly memory area\n");
+      return 2;
+   }
+
+   state->cl_start = map_area(state->start_address, state->current_area_size);
+   
+   if(!state->cl_start) {
+      fprintf(stderr, "Failed to map CL memory\n");
+      return 1;
+   }
+
+   state->cur_ins = state->cl_start + cur_ins_offset;
+
+   if(state->end_address) {
+      state->cl_end = (state->end_address - state->start_address) + state->cl_start;
+   } else {
+      state->cl_end = 0;
+   }
+
+#ifdef CL_DUMP_DEBUG
+   printf("New cur_ins: %p\n", state->cur_ins);
+#endif
+
+   return 0;
+}
+
+static uint32_t virt_to_dis_addr(void* addr, dis_state_t* state) {
+   return (addr - state->cl_start) + state->start_address;
+}
+
+static int is_cl_end(uint8_t* ins) {
+   if(*ins == V3D_HW_INSTR_HALT ||
+      *ins == V3D_HW_INSTR_BRANCH ||
+      *ins == V3D_HW_INSTR_RETURN) {
+      return 1;
+   }
+
+   return 0;
+}
+
+static void add_buf_references(void* ins, uint32_t end_address) {
+   uint8_t* opcode = ins;
+   switch(*opcode) {
+      case V3D_HW_INSTR_BRANCH_SUB: {
+         instr_BRANCH_SUB_t* branch_ins = ins;
+         add_v3d_buf(BUF_TYPE_CL, branch_ins->branch_addr, 0);
+         break;
+      }
+      case V3D_HW_INSTR_BRANCH: {
+         instr_BRANCH_t* branch_ins = ins;
+         //A BRANCH is effectively continuing the CL elsewhere (we cannot RETURN).
+         //So inherit the end_address so we know when we've hit the end in the new
+         //CL buffer.
+         add_v3d_buf(BUF_TYPE_CL, branch_ins->branch_addr, end_address);
+         break;
+      }
+   }
+}
+
+static int dis_cl(uint32_t start_address, uint32_t end_address) {
+   dis_state_t state;
+
+   init_dis_state(&state, start_address, end_address);
+
+   increase_dis_area(&state);
+
+   printf("CL buffer addr: %08x\n", start_address);
+   printf("------------------------\n");
+
+   while((!state.cl_end || (state.cur_ins < state.cl_end))) {
+      void* next_ins;
+
+      next_ins = calc_next_ins(state.cur_ins);
+      if(next_ins == 0) { //Invalid opcode
+         next_ins = state.cur_ins + 1; 
+      }
+
+      if(next_ins > state.cl_start + state.current_area_size) {
+         if(increase_dis_area(&state)) {
+            fprintf(stderr, "Failed to expand disassembly memory area\n");
+            return 1;
+         }
+
+         next_ins = calc_next_ins(state.cur_ins);
+         if(next_ins == 0) {
+            next_ins = state.cur_ins + 1; //Invalid opcode
+         }
+      }
+
+      printf("%08x: ", virt_to_dis_addr(state.cur_ins, &state));
+      if(disassemble_instr(state.cur_ins, stdout)) {
+         printf("INVALID OPCODE (%d)\n", (uint32_t)(*(uint8_t*)state.cur_ins));
+      }
+
+      add_buf_references(state.cur_ins, state.end_address);
+
+      if(is_cl_end(state.cur_ins)) {
+         unmap_area(state.cl_start, state.current_area_size);
+         return 0;
+      }
+
+      state.cur_ins = next_ins;
+
+      if(state.cur_ins >= state.cl_start + state.current_area_size) {
+         if(increase_dis_area(&state)) {
+            fprintf(stderr, "Failed to expand disassembly memory area\n");
+            return 1;
+         }
+      }
+   }
+
+   unmap_area(state.cl_start, state.current_area_size);
+
+   return 0;
+}
+

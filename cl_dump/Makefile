@@ -10,7 +10,7 @@ CLE_AUTOGEN_NAME=v3d_cl_instr_autogen
 AUTOGEN_C=$(CLE_AUTOGEN_NAME).c
 AUTOGEN_H=$(CLE_AUTOGEN_NAME).h
 
-SOURCES_C=$(AUTOGEN_C) cl_dump.c 
+SOURCES_C=$(AUTOGEN_C) cl_dump.c cl_dis.c
 
 OBJECTS_C=$(SOURCES_C:.c=.c.o)
 

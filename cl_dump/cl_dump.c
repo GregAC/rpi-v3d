@@ -1,3 +1,11 @@
+/*
+ * cl_dump - A program for dumping and examining V3D control lists and related
+ * structures and buffers
+ *
+ * Written by Greg Chadwick (mail@gregchadwick.co.uk)
+ */
+
+
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <fcntl.h>
@@ -7,9 +15,10 @@
 #include <stdlib.h>
 #include <errno.h>
 
-#include "v3d_cl_instr_autogen.h"
+#include "cl_dump.h"
 
-FILE* fd_mem;
+static FILE* fd_mem;
+static uint32_t mem_offset;
 
 int startup(void) {
    fd_mem = fopen("/dev/mem", "r+");
@@ -19,80 +28,45 @@ int startup(void) {
       return 1;
    }
 
+   mem_offset = 0;
+
    return 0;
 }
 
 void* map_area(uint32_t addr, uint32_t size) {
    void* va;
 
-   printf("Mapping area: %08X of size %d bytes\n", addr, size);
+   uint32_t page_offset;
+   uint32_t page_addr;
 
-   va = mmap(0, size, PROT_READ | PROT_WRITE, MAP_SHARED, fileno(fd_mem), addr);
+   page_addr = addr & 0xFFFFF000;
+   page_offset = addr - page_addr;
+
+#ifdef CL_DUMP_DEBUG
+   printf("Mapping area: %08x of size %d bytes, page addr: %08x modified size: %d\n", addr, size, page_addr, size + page_offset);
+#endif
+
+   va = mmap(0, size + page_offset, PROT_READ | PROT_WRITE, MAP_SHARED, fileno(fd_mem), page_addr - mem_offset);
    if(va == -1) {
       fprintf(stderr, "Mapping of V3D physical memory to virtual failed!\nReported: %s\n", strerror(errno));
       return 0;
    }
 
-   return va;
+   return va + page_offset;
 }
 
-//TODO: if end address is actually inside an instruction this may cause a segmentation error
-int do_dis(char* start_addr_str, char* end_addr_str) {
-   uint32_t start_addr;
-   uint32_t end_addr;
-   void* cl_start;
-   void* cl_end;
-   void* cur_ins;
-
+void unmap_area(void* addr, uint32_t size) {
    uint32_t page_offset;
-   uint32_t start_page_addr;
+   void*    page_addr;
 
-   if(sscanf(start_addr_str, "0x%x", &start_addr) != 1) {
-      fprintf(stderr, "Addresses must be of form 0x1234ABCD\n");
-      return 1;
-   }
+   page_addr = (void*)((uint32_t)addr & 0xFFFFF000);
+   page_offset = addr - page_addr;
 
-   if(sscanf(end_addr_str, "0x%x", &end_addr) != 1) {
-      fprintf(stderr, "Addresses must be of form 0x1234ABCD\n");
-      return 1;
-   }
+#ifdef CL_DUMP_DEBUG
+   printf("Unmapping area: %p of size %d bytes, page addr: %p modified size: %d\n", addr, size, page_addr, size + page_offset);
+#endif
 
-   printf("Disassembling CL start: %08x end: %08X\n", start_addr, end_addr);
-
-   start_page_addr = (start_addr & 0xFFFFF000);
-   page_offset = start_addr - start_page_addr;
-
-   cl_start = map_area(start_page_addr, (end_addr - start_addr) + page_offset);
-   if(!cl_start) {
-      fprintf(stderr, "Failed to map CL memory\n");
-      return 1;
-   }
-
-   cl_start += page_offset;
-   cur_ins = cl_start;
-
-   cl_end = (end_addr - start_addr) + cl_start;
-
-   while(cur_ins < cl_end) {
-      void* next_ins;
-
-      printf("%08x: ", (cur_ins - cl_start) + start_addr);
-      if(disassemble_instr(cur_ins, stdout)) {
-         printf("INVALID OPCODE (%d)\n", (uint32_t)(*(uint8_t*)cur_ins));
-         cur_ins++;
-         continue;
-      }
-
-      next_ins = calc_next_ins(cur_ins);
-      if(next_ins == 0) {
-         fprintf(stderr, "Could not calculate next address at %08x\n", (cur_ins - cl_start) + start_addr);
-         return 1;
-      }
-
-      cur_ins = next_ins;
-   }
-
-   return 0;
+   munmap(page_addr, size + page_offset);
 }
 
 int do_dump(char* out_filename, char* addr_str, char* size_str) {
@@ -130,13 +104,14 @@ int do_dump(char* out_filename, char* addr_str, char* size_str) {
    }
 
    fclose(out_file);
+   unmap_area(area, size);
 
    return 0;
 fail:
    if(out_file)
       fclose(out_file);
    if(area)
-      munmap(area, size);
+      unmap_area(area, size);
 
    return 1;
 }
@@ -163,7 +138,7 @@ int main(int argc, char* argv[]) {
          return 1;
       }
 
-      if(do_dump(argv[2], argv[3], argv[4]))
+      if(do_dump(argv[4], argv[2], argv[3]))
          return 1;
 
       return 0;
