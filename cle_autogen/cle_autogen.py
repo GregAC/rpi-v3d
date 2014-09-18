@@ -214,6 +214,34 @@ v3d_cl_instrs = [
         ]),
 ]
 
+#Not really a CL instruction, however similar structure so we create a fake
+#CLInstr so we can autogenerate code for dealing with them.
+shader_record = CLInstr('SHADER_RECORD', -1, True, True, [
+      ('flags', 16),
+      ('fs_num_uniforms', 8),
+      ('fs_num_varyings', 8),
+      ('fs_code_addr', 32),
+      ('fs_uniforms_addr', 32),
+      ('vs_num_uniforms', 16),
+      ('vs_attr_array_select', 8),
+      ('vs_total_attr_size', 8),
+      ('vs_code_addr', 32),
+      ('vs_uniforms_addr', 32),
+      ('cs_num_uniforms', 16),
+      ('cs_attr_array_select', 8),
+      ('cs_total_attr_size', 8),
+      ('cs_code_addr', 32),
+      ('cs_uniforms_addr', 32)
+   ])
+
+attr_array_record = CLInstr('ATTR_ARRAY_RECORD', -1, True, True, [
+      ('array_base_addr', 32),
+      ('array_size_bytes', 8),
+      ('array_stride', 8),
+      ('array_vs_vpm_offset', 8),
+      ('array_cs_vpm_offset', 8)
+      ])
+
 def write_out_instr_defs(instrs, out_file):
     for instr in instrs:
         out_file.write('#define V3D_HW_INSTR_{0} {1}\n'.format(instr.name, instr.opcode))
@@ -231,7 +259,10 @@ def choose_c_type(arg):
         return 'uint64_t'
 
 def write_out_instr_struct(instr, out_file):
-    out_file.write('''typedef struct {\n\tuint8_t opcode;\n''')
+    if(instr.opcode == -1):
+       out_file.write('''typedef struct {\n''')
+    else:
+      out_file.write('''typedef struct {\n\tuint8_t opcode;\n''')
 
     #TODO: Check that the c bit packing won't leave any gaps
     for a in instr.arguments:
@@ -248,8 +279,9 @@ def write_out_instr_emit_fun(instr, out_file):
 \tinstr_{instr_name}_t  new_ins;
 \tinstr_{instr_name}_t* ins = (instr_{instr_name}_t*)*cur_ins;
 \t
-\tnew_ins.opcode = {instr_opcode};
-'''.format(instr_name = instr.name, instr_opcode = instr.opcode))
+'''.format(instr_name = instr.name))
+    if(instr.opcode != -1):
+      out_file.write('\tnew_ins.opcode = {0};\n'.format(instr.opcode))
 
     for a in instr.arguments:
         out_file.write('\tnew_ins.{0} = {0};\n'.format(a[0]))
@@ -346,6 +378,11 @@ def main(out_filename):
    for instr in v3d_cl_instrs:
        write_out_instr_struct(instr, h_out_file)
        write_out_instr_fun_defs(instr, h_out_file)
+
+   write_out_instr_struct(shader_record, h_out_file)
+   write_out_instr_fun_defs(shader_record, h_out_file)
+   write_out_instr_struct(attr_array_record, h_out_file)
+   write_out_instr_fun_defs(attr_array_record, h_out_file)
    
    h_out_file.write(h_footer)
    
@@ -353,6 +390,11 @@ def main(out_filename):
    for instr in v3d_cl_instrs:
        write_out_instr_emit_fun(instr, c_out_file)
        write_out_instr_disassemble_fun(instr, c_out_file)
+
+   write_out_instr_emit_fun(shader_record, c_out_file)
+   write_out_instr_disassemble_fun(shader_record, c_out_file)
+   write_out_instr_emit_fun(attr_array_record, c_out_file)
+   write_out_instr_disassemble_fun(attr_array_record, c_out_file)
 
    write_out_calc_next_ins_fun(v3d_cl_instrs, c_out_file)
    write_out_disassemble_fun(v3d_cl_instrs, c_out_file)
