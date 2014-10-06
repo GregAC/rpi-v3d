@@ -149,13 +149,8 @@ static unsigned int v3d_mem_handle;
 static unsigned int v3d_mem_pages;
 
 static void v3d_reset() {
-   QpuEnable(0);
-   QpuEnable(1);
-
-   g_pV3dCle->m_ct0cs = 1 << 15;
-   g_pV3dCle->m_ct1cs = 1 << 15;
-
-   barrier();
+   QpuEnable(false);
+   QpuEnable(true);
 
    g_pV3dIntCtl->m_intdis = 0xF;
 
@@ -165,15 +160,17 @@ static void v3d_reset() {
 static int v3d_init() {
    unsigned int ident[3];
 
-   v3d_reset();
+   QpuEnable(true);
    
    ident[0] = g_pV3dIdent->m_ident0;
    ident[1] = g_pV3dIdent->m_ident1;
    ident[2] = g_pV3dIdent->m_ident2;
 
+   printk(KERN_DEBUG "Maybe need some dodgy forced wait?");
+
    if((ident[0] & 0xFFFFFF) != (('D' << 16) | ('3' << 8) | 'V')) {
-      printk(KERN_DEBUG "Failed to find V3D\n");
-      QpuEnable(0);
+      printk(KERN_DEBUG "Failed to find V3D ident %X %X %X\n", ident[0], ident[1], ident[2]);
+      QpuEnable(false);
       return -1;
    }
 
@@ -195,12 +192,14 @@ static int v3d_init() {
 
 static int v3d_open(struct inode* inode, struct file* file) 
 {
-   if(atomic_inc_and_test(&v3d_opened) != 1) {
+   if(atomic_inc_and_test(&v3d_opened) != 0) {
+      printk(KERN_DEBUG "Something else has V3D open, open failed\n");
       atomic_dec(&v3d_opened);
       return -EBUSY;
    }
 
    if(v3d_init()) {
+      printk(KERN_DEBUG "V3D init fail, open failed\n");
       atomic_dec(&v3d_opened);
       return -EIO;
    }
@@ -233,7 +232,7 @@ int v3d_alloc_mem(unsigned int pages)
       return -1;
    }
 
-   if(AllocateVcMemory(&v3d_mem_handle, pages * 4096, 4096, MEM_FLAG_L1_NONALLOCATING | MEM_FLAG_HINT_PERMALOCK)) {
+   if(AllocateVcMemory(&v3d_mem_handle, pages * 4096, 4096, MEM_FLAG_COHERENT)) {
       printk(KERN_ERR "Could not allocate V3D memory\n");
       return -EINVAL;
    }
@@ -246,7 +245,7 @@ int v3d_alloc_mem(unsigned int pages)
       return -EINVAL;
    }
 
-   v3d_mem = v3d_mem_bus & 0x0FFFFFFF;
+   v3d_mem = v3d_mem_bus & 0x3FFFFFFF;
    v3d_mem_pages = pages;
 
    printk(KERN_DEBUG "Allocated %d bytes of V3D memory bus address: %X phys address: %x\n", pages * 4096, v3d_mem_bus, v3d_mem);
@@ -258,9 +257,10 @@ static int v3d_release(struct inode* inode, struct file* file)
 {
    atomic_dec(&v3d_opened);
 
+   printk(KERN_DEBUG "Closing V3D, freeing V3D memory and disabling V3D block\n");
    v3d_free_mem();
 
-   QpuEnable(0);
+   QpuEnable(false);
 
    return 0;
 }
@@ -314,12 +314,17 @@ static int run_v3d_job(v3d_job_t* job) {
    g_pV3dCle->m_ct0ea = job->bin_end;
    barrier();
 
-   timeout  = 10000;
+   timeout  = 1000000;
    bin_done = 0;
    rdr_done = 0;
 
    current_bin_flushes   = g_pV3dCle->m_bfc;
    current_rdr_completes = g_pV3dCle->m_rfc;
+
+   printk(KERN_ERR "Running V3D job Bin %x %x Rdr %x %x Overspill %d bytes from %X\n",
+           job->bin_start, job->bin_end,
+           job->rdr_start, job->rdr_end,
+           job->bin_overspill, job->bin_overspill_size);
 
    while(timeout) {
       if(g_pV3dCle->m_pcs & 0x100) {
@@ -335,7 +340,6 @@ static int run_v3d_job(v3d_job_t* job) {
          if(mem_to_give > job->bin_overspill_size) {
             mem_to_give = job->bin_overspill_size;
          }
-
          printk(KERN_ERR "Out of binning overspill memory, giving it %d bytes more\n", mem_to_give);
 
          g_pV3dBinning->m_bpoa = job->bin_overspill;
@@ -345,6 +349,16 @@ static int run_v3d_job(v3d_job_t* job) {
 
          job->bin_overspill_size -= mem_to_give;
          job->bin_overspill      += mem_to_give;
+
+         unsigned int current_addr = g_pV3dCle->m_ct0ca;
+         
+	     while (timeout--)
+	     {
+	     	if (g_pV3dCle->m_ct0ca != current_addr)
+	     		break;
+            schedule();
+	     }
+	     timeout = 1000000;
       }
 
       if(!bin_done) {
@@ -366,11 +380,11 @@ static int run_v3d_job(v3d_job_t* job) {
                //Kick off render thread
                g_pV3dCle->m_ct1cs = 1 << 5;
                barrier();
-               g_pV3dCle->m_ct1ca = job->bin_start;
+               g_pV3dCle->m_ct1ca = job->rdr_start;
                barrier();
-               g_pV3dCle->m_ct1ea = job->bin_end;
+               g_pV3dCle->m_ct1ea = job->rdr_end;
 
-               timeout = 10000;
+               timeout = 1000000;
             }
          }
       }
@@ -444,6 +458,8 @@ static int v3d_mmap(struct file* file, struct vm_area_struct *vma)
    unsigned long size;
 
    size = vma->vm_end - vma->vm_start;
+
+   printk(KERN_DEBUG "Mapping memory of size %d bytes\n", size);
    if((size + (vma->vm_pgoff << PAGE_SHIFT)) > (v3d_mem_pages << PAGE_SHIFT)) {
       printk(KERN_ERR "Tried to mmap beyond V3D memory\n");
       return -EINVAL;

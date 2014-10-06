@@ -37,10 +37,6 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <linux/ioctl.h>
 #include <stdint.h>
 
-#define MAJOR_NUM 100
-#define IOCTL_MBOX_PROPERTY _IOWR(MAJOR_NUM, 0, char *)
-#define DEVICE_FILE_NAME "char_dev"
-
 struct GPU_PTR {
     unsigned vc;
     union { struct GPU_FFT_COMPLEX *cptr;
@@ -51,29 +47,15 @@ struct GPU_PTR {
 };
 
 struct GPU_BASE {
-    uint32_t mb;
-    uint32_t mem_handle, mem_size;
+    uint32_t mem_size;
+    int      v3d_fd;
     struct GPU_PTR mem_base;
 
     volatile uint32_t *peri;
 };
 
-
-int mbox_open();
-void mbox_close(int file_desc);
-
-unsigned get_version(int file_desc);
-unsigned mem_alloc(int file_desc, unsigned size, unsigned align, unsigned flags);
-unsigned mem_free(int file_desc, unsigned handle);
-unsigned mem_lock(int file_desc, unsigned handle);
-unsigned mem_unlock(int file_desc, unsigned handle);
-void *mapmem(unsigned base, unsigned size);
-void unmapmem(void *addr, unsigned size);
-
-unsigned qpu_enable(int file_desc, unsigned enable);
-
 int v3d_init (
-    int mb,
+    char* v3d_dev,
     uint32_t mem_size,
     struct GPU_BASE* base);
 void v3d_shutdown(struct GPU_BASE *base);

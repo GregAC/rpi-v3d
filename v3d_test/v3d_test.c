@@ -58,9 +58,7 @@ uint32_t float_to_bits(float f) {
 }
 
 int startup(void) {
-    int mb = mbox_open();
-
-    if(v3d_init(mb, 64 * 1024 * 1024, &gpu_base)) {
+    if(v3d_init("/dev/v3d", (64 * 1024 * 1024) / 4096, &gpu_base)) {
         printf("V3D init failed\n");
         return 1;
     }
@@ -94,7 +92,8 @@ fail:
 #define INITIAL_TILE_CL_SIZE 32
 
 int produce_test_bin(void* start, void** end, void* bin_mem, void* state_bin) {
-   volatile void* cur_bin_ins = start;
+   void* cur_bin_ins = start;
+   void* dummy_shader_rec = simple_alloc(1);
 
    printf("Binning memory at virt: %p, phys: %x\n", bin_mem, virt_to_phys(bin_mem));
    printf("Binning state memory at virt: %p, phys: %x\n", state_bin, virt_to_phys(state_bin));
@@ -115,7 +114,16 @@ int produce_test_bin(void* start, void** end, void* bin_mem, void* state_bin) {
          );
 
    emit_START_TILE_BINNING(&cur_bin_ins);
+
    emit_PRIMITIVE_LIST_FORMAT(&cur_bin_ins, 2, 1);
+   emit_STATE_CLIP_WINDOW(&cur_bin_ins, 0, 0, 780, 438);
+   emit_STATE_CLIPPER_XY(&cur_bin_ins, 0x46700000, 0xC6070000);
+   emit_STATE_VIEWPORT_OFFSET(&cur_bin_ins, 0x3c00, 0x21c0);
+   emit_STATE_CLIPPER_Z(&cur_bin_ins, 0x3f800000, 0x0);
+   emit_STATE_CFG(&cur_bin_ins, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 3, 1, 1, 1, 0);
+   emit_STATE_DEPTH_OFFSET(&cur_bin_ins, 0xbf80, 0xc000);
+   emit_STATE_LINE_WIDTH(&cur_bin_ins, 0x3f800000);
+   emit_STATE_FLATSHADE(&cur_bin_ins, 0);
 
    emit_INCR_SEMAPHORE(&cur_bin_ins);
    emit_FLUSH(&cur_bin_ins);
@@ -127,9 +135,11 @@ int produce_test_bin(void* start, void** end, void* bin_mem, void* state_bin) {
 
 
 int produce_test_rdr(void* start, void** end, void* fb, void* bin_mem) {
-   volatile void* cur_rdr_ins = start;
+   void* cur_rdr_ins = start;
    uint32_t x;
    uint32_t y;
+
+   uint32_t nv_insert = 5;
 
    printf("Framebuffer at virt: %p, phys: %x\n", fb, virt_to_phys(fb));
 
@@ -152,9 +162,18 @@ int produce_test_rdr(void* start, void** end, void* fb, void* bin_mem) {
          0  //UNUSED
          );
 
+   emit_STATE_TILE_COORDS(&cur_rdr_ins, 0, 0);
    emit_STORE_GENERAL(&cur_rdr_ins, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0);
 
-   emit_WAIT_SEMAPHORE(&cur_rdr_ins);
+   void* dummy_vert = simple_alloc(1);
+   memset(dummy_vert, 0, 4096);
+
+   void* shader_rec = simple_alloc(1);
+   void* shader_rec_start = shader_rec;
+
+   //emit_STATE_CFG(&cur_rdr_ins, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+
+   //emit_WAIT_SEMAPHORE(&cur_rdr_ins);
 
    for(y = 0;y < H_IN_TILES;y++) {
       for(x = 0;x < W_IN_TILES;x++) {
@@ -169,13 +188,18 @@ int produce_test_rdr(void* start, void** end, void* fb, void* bin_mem) {
 
          emit_BRANCH_SUB(&cur_rdr_ins, virt_to_phys(tile_sublist));
 
-         if(x == W_IN_TILES - 1 && y == H_IN_TILES - 1) {
+         if((x == (W_IN_TILES - 1)) && (y == (H_IN_TILES - 1))) {
             emit_STORE_SUBSAMPLE_EOF(&cur_rdr_ins);
          } else {
             emit_STORE_SUBSAMPLE(&cur_rdr_ins);
          }
       }
    }
+
+   emit_NOP(&cur_rdr_ins);
+   emit_NOP(&cur_rdr_ins);
+   emit_NOP(&cur_rdr_ins);
+   emit_NOP(&cur_rdr_ins);
 
    *end = cur_rdr_ins;
 
@@ -297,7 +321,7 @@ int main(int argc, char* argv[]) {
    if(startup())
       return 1;
 
-   if(run_test());
+   if(run_test())
         printf("Test failed\n");
 
    v3d_shutdown(&gpu_base);
