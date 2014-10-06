@@ -35,11 +35,12 @@ typedef struct {
    uint32_t current_area_size;
 } dis_state_t;
 
-#define BUF_TYPE_NONE           0
-#define BUF_TYPE_CL             1
-#define BUF_TYPE_SHADER_REC     2
-#define BUF_TYPE_SHADER_REC_EXT 3
-#define BUF_TYPE_QPU_PROG       4
+#define BUF_TYPE_NONE              0
+#define BUF_TYPE_CL                1
+#define BUF_TYPE_GL_SHADER_REC     2
+#define BUF_TYPE_GL_SHADER_REC_EXT 3
+#define BUF_TYPE_QPU_PROG          4
+#define BUF_TYPE_NV_SHADER_REC     5
 
 typedef struct v3d_buf {
    struct v3d_buf* next;
@@ -60,7 +61,8 @@ static uint32_t virt_to_dis_addr(void* addr, dis_state_t* state);
 static int is_cl_end(uint8_t* ins);
 static void add_buf_references(void* ins, uint32_t end_address);
 static int dis_cl(uint32_t start_address, uint32_t end_address);
-static int dis_shader_rec(uint32_t start_address, uint32_t end_address);
+static int dis_gl_shader_rec(uint32_t start_address, uint32_t end_address);
+static int dis_nv_shader_rec(uint32_t start_address, uint32_t end_address);
 static int dis_qpu_prog(uint32_t start_address, uint32_t end_address);
 
 //TODO: if end address is actually inside an instruction this may cause a segmentation error
@@ -89,14 +91,19 @@ int do_dis(char* start_addr_str, char* end_addr_str) {
                fprintf(stderr, "Failed to disassemble CL buf start: %08x end: %08x\n", v3d_bufs->buf_start, v3d_bufs->buf_end);
             }
             break;
-         case BUF_TYPE_SHADER_REC:
-            if(dis_shader_rec(v3d_bufs->buf_start, v3d_bufs->buf_end)) {
+         case BUF_TYPE_GL_SHADER_REC:
+            if(dis_gl_shader_rec(v3d_bufs->buf_start, v3d_bufs->buf_end)) {
                fprintf(stderr, "Failed to disassemble shader rec buf start: %08x end: %08x\n", v3d_bufs->buf_start, v3d_bufs->buf_end);
             }
             break;
          case BUF_TYPE_QPU_PROG:
             if(dis_qpu_prog(v3d_bufs->buf_start, v3d_bufs->buf_end)) {
                fprintf(stderr, "Failed to disassemble QPU buf start: %08x, end: %08x\n", v3d_bufs->buf_start, v3d_bufs->buf_end);
+            }
+            break;
+         case BUF_TYPE_NV_SHADER_REC:
+            if(dis_nv_shader_rec(v3d_bufs->buf_start, v3d_bufs->buf_end)) {
+               fprintf(stderr, "Failed to disassemble shader rec buf start: %08x end: %08x\n", v3d_bufs->buf_start, v3d_bufs->buf_end);
             }
             break;
          default:
@@ -235,18 +242,26 @@ static void add_buf_references(void* ins, uint32_t end_address) {
          uint32_t buf_size;
 
 
-         buf_size = sizeof(instr_SHADER_RECORD_t) 
+         buf_size = sizeof(instr_GL_SHADER_RECORD_t) 
             + sizeof(instr_ATTR_ARRAY_RECORD_t) * glshader_ins->num_attr_arrays;
          
          if(glshader_ins->extended_record) {
-            buf_type = BUF_TYPE_SHADER_REC_EXT;
+            buf_type = BUF_TYPE_GL_SHADER_REC_EXT;
             //TODO: workout what to do with buf_size
          } else {
-            buf_type = BUF_TYPE_SHADER_REC;
+            buf_type = BUF_TYPE_GL_SHADER_REC;
          }
 
          add_v3d_buf(buf_type, shader_record_addr, shader_record_addr + buf_size);
       }
+      case V3D_HW_INSTR_NV_SHADER: {
+         instr_NV_SHADER_t* nvshader_ins = ins;
+
+         uint32_t shader_record_addr = nvshader_ins->shader_record_addr;
+
+         add_v3d_buf(BUF_TYPE_NV_SHADER_REC, shader_record_addr, shader_record_addr + sizeof(instr_NV_SHADER_RECORD_t));
+      }
+
    }
 }
 
@@ -309,14 +324,14 @@ static int dis_cl(uint32_t start_address, uint32_t end_address) {
    return 0;
 }
 
-static int dis_shader_rec(uint32_t start_address, uint32_t end_address) {
-   instr_SHADER_RECORD_t* shader_rec;
+static int dis_gl_shader_rec(uint32_t start_address, uint32_t end_address) {
+   instr_GL_SHADER_RECORD_t* shader_rec;
    instr_ATTR_ARRAY_RECORD_t* cur_attr_array;
    instr_ATTR_ARRAY_RECORD_t* attr_array_end;
 
    void* shader_rec_mem = map_area(start_address, end_address - start_address);
 
-   printf("Shader Record Addr: %08x\n", start_address);
+   printf("GL Shader Record Addr: %08x\n", start_address);
    printf("----------------------------\n");
 
    if(shader_rec_mem == 0) {
@@ -325,10 +340,10 @@ static int dis_shader_rec(uint32_t start_address, uint32_t end_address) {
    }
 
    shader_rec = shader_rec_mem;
-   cur_attr_array = shader_rec_mem + sizeof(instr_SHADER_RECORD_t);
+   cur_attr_array = shader_rec_mem + sizeof(instr_GL_SHADER_RECORD_t);
 
    printf("%08X: ", start_address);
-   disassemble_SHADER_RECORD(shader_rec, stdout);
+   disassemble_GL_SHADER_RECORD(shader_rec, stdout);
 
    add_v3d_buf(BUF_TYPE_QPU_PROG, shader_rec->fs_code_addr, 0);
    add_v3d_buf(BUF_TYPE_QPU_PROG, shader_rec->vs_code_addr, 0);
@@ -342,6 +357,33 @@ static int dis_shader_rec(uint32_t start_address, uint32_t end_address) {
 
       cur_attr_array++;
    }
+
+   unmap_area(shader_rec_mem, end_address - start_address);
+
+   printf("\n\n");
+
+   return 0;
+}
+
+static int dis_nv_shader_rec(uint32_t start_address, uint32_t end_address) {
+   instr_NV_SHADER_RECORD_t* shader_rec;
+
+   void* shader_rec_mem = map_area(start_address, end_address - start_address);
+
+   printf("NV Shader Record Addr: %08x\n", start_address);
+   printf("----------------------------\n");
+
+   if(shader_rec_mem == 0) {
+      fprintf(stderr, "Failed to map shader record memory\n");
+      return 1;
+   }
+
+   shader_rec = shader_rec_mem;
+
+   printf("%08X: ", start_address);
+   disassemble_NV_SHADER_RECORD(shader_rec, stdout);
+
+   add_v3d_buf(BUF_TYPE_QPU_PROG, shader_rec->fs_code_addr, 0);
 
    unmap_area(shader_rec_mem, end_address - start_address);
 

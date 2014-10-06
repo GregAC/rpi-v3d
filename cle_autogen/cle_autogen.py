@@ -216,7 +216,7 @@ v3d_cl_instrs = [
 
 #Not really a CL instruction, however similar structure so we create a fake
 #CLInstr so we can autogenerate code for dealing with them.
-shader_record = CLInstr('SHADER_RECORD', -1, True, True, [
+gl_shader_record = CLInstr('GL_SHADER_RECORD', -1, True, True, [
       ('flags', 16),
       ('fs_num_uniforms', 8),
       ('fs_num_varyings', 8),
@@ -240,6 +240,16 @@ attr_array_record = CLInstr('ATTR_ARRAY_RECORD', -1, True, True, [
       ('array_stride', 8),
       ('array_vs_vpm_offset', 8),
       ('array_cs_vpm_offset', 8)
+      ])
+
+nv_shader_record = CLInstr('NV_SHADER_RECORD', -1, True, True, [
+      ('flags', 8),
+      ('vertex_data_stride', 8),
+      ('fs_num_uniforms', 8),
+      ('fs_num_varyings', 8),
+      ('fs_code_addr', 32),
+      ('fs_uniforms_addr', 32),
+      ('vertex_data_address', 32)
       ])
 
 def write_out_instr_defs(instrs, out_file):
@@ -379,8 +389,10 @@ def main(out_filename):
        write_out_instr_struct(instr, h_out_file)
        write_out_instr_fun_defs(instr, h_out_file)
 
-   write_out_instr_struct(shader_record, h_out_file)
-   write_out_instr_fun_defs(shader_record, h_out_file)
+   write_out_instr_struct(gl_shader_record, h_out_file)
+   write_out_instr_fun_defs(gl_shader_record, h_out_file)
+   write_out_instr_struct(nv_shader_record, h_out_file)
+   write_out_instr_fun_defs(nv_shader_record, h_out_file)
    write_out_instr_struct(attr_array_record, h_out_file)
    write_out_instr_fun_defs(attr_array_record, h_out_file)
    
@@ -391,8 +403,10 @@ def main(out_filename):
        write_out_instr_emit_fun(instr, c_out_file)
        write_out_instr_disassemble_fun(instr, c_out_file)
 
-   write_out_instr_emit_fun(shader_record, c_out_file)
-   write_out_instr_disassemble_fun(shader_record, c_out_file)
+   write_out_instr_emit_fun(gl_shader_record, c_out_file)
+   write_out_instr_disassemble_fun(gl_shader_record, c_out_file)
+   write_out_instr_emit_fun(nv_shader_record, c_out_file)
+   write_out_instr_disassemble_fun(nv_shader_record, c_out_file)
    write_out_instr_emit_fun(attr_array_record, c_out_file)
    write_out_instr_disassemble_fun(attr_array_record, c_out_file)
 

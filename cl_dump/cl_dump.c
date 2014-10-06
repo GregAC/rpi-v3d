@@ -175,7 +175,21 @@ int main(int argc, char* argv[]) {
          return 1;
 
       return 0;
-   } else {
+   } else if(strcmp(argv[1], "search") == 0) {
+      if(startup(0, 0))
+         return 1;
+
+      if(argc != 4) {
+         print_usage(argv[0]);
+         return 1;
+      }
+
+      if(do_search(argv[2], argv[3]))
+         return 1;
+
+      return 0;
+   }
+   else {
       fprintf(stderr, "Invalid command %s\n", argv[1]);
       return 1;
    }

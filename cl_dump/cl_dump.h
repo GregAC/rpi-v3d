@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 int do_dis(char* start_addr_str, char* end_addr_str);
+int do_search(char* start_addr_str, char* size_str);
 void* map_area(uint32_t addr, uint32_t size);
 void unmap_area(void* addr, uint32_t size);
 
